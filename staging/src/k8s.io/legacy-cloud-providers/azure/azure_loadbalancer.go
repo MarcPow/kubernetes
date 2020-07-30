@@ -80,6 +80,9 @@ const (
 	// ServiceAnnotationPIPName specifies the pip that will be applied to load balancer
 	ServiceAnnotationPIPName = "service.beta.kubernetes.io/azure-pip-name"
 
+	// ServiceAnnotationPIPIPTags specifies the iptags used when dynamically creating a public ip
+	ServiceAnnotationPIPIPTags = "service.beta.kubernetes.io/azure-pip-iptags"
+
 	// ServiceAnnotationAllowedServiceTag is the annotation used on the service
 	// to specify a list of allowed service tags separated by comma
 	// Refer https://docs.microsoft.com/en-us/azure/virtual-network/security-overview#service-tags for all supported service tags.
@@ -144,6 +147,13 @@ func (az *Cloud) GetLoadBalancer(ctx context.Context, clusterName string, servic
 func getPublicIPDomainNameLabel(service *v1.Service) (string, bool) {
 	if labelName, found := service.Annotations[ServiceAnnotationDNSLabelName]; found {
 		return labelName, found
+	}
+	return "", false
+}
+
+func getPublicIPIPTags(service *v1.Service) (string, bool) {
+	if tagLabelValue, found := service.Annotations[ServiceAnnotationPIPIPTags]; found {
+		return tagLabelValue, found
 	}
 	return "", false
 }
@@ -508,6 +518,7 @@ func (az *Cloud) ensurePublicIPExists(service *v1.Service, pipName string, domai
 	}
 
 	serviceName := getServiceName(service)
+	ipTags, _ := getPublicIPIPTags(service)
 
 	if existsPip {
 		// return if pip exist and dns label is the same
@@ -528,6 +539,7 @@ func (az *Cloud) ensurePublicIPExists(service *v1.Service, pipName string, domai
 		pip.Location = to.StringPtr(az.Location)
 		pip.PublicIPAddressPropertiesFormat = &network.PublicIPAddressPropertiesFormat{
 			PublicIPAllocationMethod: network.Static,
+			IPTags:                   getIPTagsForPublicIP(ipTags),
 		}
 		pip.Tags = map[string]*string{
 			serviceTagKey:  &serviceName,
@@ -586,11 +598,39 @@ func (az *Cloud) ensurePublicIPExists(service *v1.Service, pipName string, domai
 	return &pip, nil
 }
 
+func getIPTagsForPublicIP(tagString string) *[]network.IPTag {
+
+	if len(tagString) == 0 {
+		return nil
+	}
+
+	outputTags := []network.IPTag{}
+	commaDelimitedPairs := strings.Split(tagString, ",")
+	for _, commaDelimitedPair := range commaDelimitedPairs {
+		splitKeyValue := strings.Split(commaDelimitedPair, "=")
+		if len(splitKeyValue) == 2 {
+			outputTags = append(outputTags, network.IPTag{
+				IPTagType: &splitKeyValue[0],
+				Tag:       &splitKeyValue[1],
+			})
+		}
+	}
+
+	return &outputTags
+}
+
 func getDomainNameLabel(pip *network.PublicIPAddress) string {
 	if pip == nil || pip.PublicIPAddressPropertiesFormat == nil || pip.PublicIPAddressPropertiesFormat.DNSSettings == nil {
 		return ""
 	}
 	return to.String(pip.PublicIPAddressPropertiesFormat.DNSSettings.DomainNameLabel)
+}
+
+func getIPTags(pip *network.PublicIPAddress) *[]network.IPTag {
+	if pip == nil || pip.PublicIPAddressPropertiesFormat == nil || pip.PublicIPAddressPropertiesFormat.IPTags == nil {
+		return nil
+	}
+	return pip.PublicIPAddressPropertiesFormat.IPTags
 }
 
 func getIdleTimeout(s *v1.Service) (*int32, error) {
