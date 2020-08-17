@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -544,6 +545,188 @@ func TestGetPublicIPAddressResourceGroup(t *testing.T) {
 	}
 }
 
+func TestGetIPTagMapForPublicIP(t *testing.T) {
+	tests := []struct {
+		desc     string
+		service  *v1.Service
+		expected map[string]string
+	}{
+		{
+			desc:     "empty map should be returned when service is nil",
+			service:  nil,
+			expected: map[string]string{},
+		},
+		{
+			desc:     "empty map should be returned when service has no annotations",
+			service:  &v1.Service{},
+			expected: map[string]string{},
+		},
+		{
+			desc: "a single tag should be returned when service has set one tag pair in the annotation",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						ServiceAnnotationIPTagsForPublicIP: "tag1=tagvalue1",
+					},
+				},
+			},
+			expected: map[string]string{
+				"tag1": "tagvalue1",
+			},
+		},
+		{
+			desc: "a single tag should be returned when service has set one tag pair in the annotation (and spaces are trimmed)",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						ServiceAnnotationIPTagsForPublicIP: " tag1 = tagvalue1 ",
+					},
+				},
+			},
+			expected: map[string]string{
+				"tag1": "tagvalue1",
+			},
+		},
+		{
+			desc: "a single tag should be returned when service has set two tag pairs in the annotation with the same key (last write wins - according to appearance order in the string)",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						ServiceAnnotationIPTagsForPublicIP: "tag1=tagvalue1,tag1=tagvalue1new",
+					},
+				},
+			},
+			expected: map[string]string{
+				"tag1": "tagvalue1new",
+			},
+		},
+		{
+			desc: "two tags should be returned when service has set two tag pairs in the annotation",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						ServiceAnnotationIPTagsForPublicIP: "tag1=tagvalue1,tag2=tagvalue2",
+					},
+				},
+			},
+			expected: map[string]string{
+				"tag1": "tagvalue1",
+				"tag2": "tagvalue2",
+			},
+		},
+		{
+			desc: "two tags should be returned when service has set two tag pairs (and one malformation) in the annotation",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						ServiceAnnotationIPTagsForPublicIP: "tag1=tagvalue1,tag2=tagvalue2,tag3malformed",
+					},
+				},
+			},
+			expected: map[string]string{
+				"tag1": "tagvalue1",
+				"tag2": "tagvalue2",
+			},
+		},
+		{
+			// We may later decide not to support blank values.  The Azure contract is not entirely clear here.
+			desc: "two tags should be returned when service has set two tag pairs (and one has a blank value) in the annotation",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						ServiceAnnotationIPTagsForPublicIP: "tag1=tagvalue1,tag2=",
+					},
+				},
+			},
+			expected: map[string]string{
+				"tag1": "tagvalue1",
+				"tag2": "",
+			},
+		},
+		{
+			// We may later decide not to support blank keys.  The Azure contract is not entirely clear here.
+			desc: "two tags should be returned when service has set two tag pairs (and one has a blank key) in the annotation",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						ServiceAnnotationIPTagsForPublicIP: "tag1=tagvalue1,=tag2value",
+					},
+				},
+			},
+			expected: map[string]string{
+				"tag1": "tagvalue1",
+				"":     "tag2value",
+			},
+		},
+	}
+
+	for i, c := range tests {
+		testMap := getIPTagMapForPublicIP(c.service)
+		assert.Equal(t, testMap, c.expected, "TestCase[%d]: %s", i, c.desc)
+	}
+}
+
+func TestConvertIPTagMapToSlice(t *testing.T) {
+	tests := []struct {
+		desc     string
+		input    map[string]string
+		expected *[]network.IPTag
+	}{
+		{
+			desc:     "nil slice should be returned when the map is nil",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			desc:     "nil slice should be returned when the map is empty",
+			input:    map[string]string{},
+			expected: nil,
+		},
+		{
+			desc: "one tag should be returned when the map has one tag",
+			input: map[string]string{
+				"tag1": "tag1value",
+			},
+			expected: &[]network.IPTag{
+				network.IPTag{
+					IPTagType: to.StringPtr("tag1"),
+					Tag:       to.StringPtr("tag1value"),
+				},
+			},
+		},
+		{
+			desc: "two tags should be returned when the map has two tags",
+			input: map[string]string{
+				"tag1": "tag1value",
+				"tag2": "tag2value",
+			},
+			expected: &[]network.IPTag{
+				network.IPTag{
+					IPTagType: to.StringPtr("tag1"),
+					Tag:       to.StringPtr("tag1value"),
+				},
+				network.IPTag{
+					IPTagType: to.StringPtr("tag2"),
+					Tag:       to.StringPtr("tag2value"),
+				},
+			},
+		},
+	}
+
+	for i, c := range tests {
+		actual := convertIPTagMapToSlice(c.input)
+
+		// Sort output to provide stability of return from map for test comparison
+		// The order doesn't matter at runtime.
+		if actual != nil {
+			sort.Slice(*actual, func(i, j int) bool {
+				ipTagSlice := *actual
+				return to.String(ipTagSlice[i].IPTagType) < to.String(ipTagSlice[j].IPTagType)
+			})
+		}
+		assert.Equal(t, actual, c.expected, "TestCase[%d]: %s", i, c.desc)
+	}
+}
 func TestGetServiceTags(t *testing.T) {
 	tests := []struct {
 		desc     string

@@ -80,8 +80,8 @@ const (
 	// ServiceAnnotationPIPName specifies the pip that will be applied to load balancer
 	ServiceAnnotationPIPName = "service.beta.kubernetes.io/azure-pip-name"
 
-	// ServiceAnnotationPIPIPTags specifies the iptags used when dynamically creating a public ip
-	ServiceAnnotationPIPIPTags = "service.beta.kubernetes.io/azure-pip-iptags"
+	// ServiceAnnotationIPTagsForPublicIP specifies the iptags used when dynamically creating a public ip
+	ServiceAnnotationIPTagsForPublicIP = "service.beta.kubernetes.io/azure-pip-ip-tags"
 
 	// ServiceAnnotationAllowedServiceTag is the annotation used on the service
 	// to specify a list of allowed service tags separated by comma
@@ -147,13 +147,6 @@ func (az *Cloud) GetLoadBalancer(ctx context.Context, clusterName string, servic
 func getPublicIPDomainNameLabel(service *v1.Service) (string, bool) {
 	if labelName, found := service.Annotations[ServiceAnnotationDNSLabelName]; found {
 		return labelName, found
-	}
-	return "", false
-}
-
-func getPublicIPIPTags(service *v1.Service) (string, bool) {
-	if tagLabelValue, found := service.Annotations[ServiceAnnotationPIPIPTags]; found {
-		return tagLabelValue, found
 	}
 	return "", false
 }
@@ -518,7 +511,6 @@ func (az *Cloud) ensurePublicIPExists(service *v1.Service, pipName string, domai
 	}
 
 	serviceName := getServiceName(service)
-	ipTags, _ := getPublicIPIPTags(service)
 
 	if existsPip {
 		// return if pip exist and dns label is the same
@@ -539,7 +531,7 @@ func (az *Cloud) ensurePublicIPExists(service *v1.Service, pipName string, domai
 		pip.Location = to.StringPtr(az.Location)
 		pip.PublicIPAddressPropertiesFormat = &network.PublicIPAddressPropertiesFormat{
 			PublicIPAllocationMethod: network.Static,
-			IPTags:                   getIPTagsForPublicIP(ipTags),
+			IPTags:                   getIPTagsForPublicIP(service),
 		}
 		pip.Tags = map[string]*string{
 			serviceTagKey:  &serviceName,
@@ -598,22 +590,53 @@ func (az *Cloud) ensurePublicIPExists(service *v1.Service, pipName string, domai
 	return &pip, nil
 }
 
-func getIPTagsForPublicIP(tagString string) *[]network.IPTag {
+func getIPTagsForPublicIP(service *v1.Service) *[]network.IPTag {
+	return convertIPTagMapToSlice(getIPTagMapForPublicIP(service))
+}
 
-	if len(tagString) == 0 {
+func getIPTagMapForPublicIP(service *v1.Service) map[string]string {
+	outputMap := make(map[string]string)
+
+	if service == nil {
+		return outputMap
+	}
+
+	if ipTagString, found := service.Annotations[ServiceAnnotationIPTagsForPublicIP]; found {
+		commaDelimitedPairs := strings.Split(strings.TrimSpace(ipTagString), ",")
+		for _, commaDelimitedPair := range commaDelimitedPairs {
+			splitKeyValue := strings.Split(commaDelimitedPair, "=")
+
+			// Include only valid pairs in the return value
+			// Last Write wins.
+			if len(splitKeyValue) == 2 {
+				tagKey := strings.TrimSpace(splitKeyValue[0])
+				tagValue := strings.TrimSpace(splitKeyValue[1])
+
+				outputMap[tagKey] = tagValue
+			}
+		}
+	}
+
+	return outputMap
+}
+
+func convertIPTagMapToSlice(ipTagMap map[string]string) *[]network.IPTag {
+
+	if ipTagMap == nil {
+		return nil
+	}
+
+	if len(ipTagMap) == 0 {
 		return nil
 	}
 
 	outputTags := []network.IPTag{}
-	commaDelimitedPairs := strings.Split(tagString, ",")
-	for _, commaDelimitedPair := range commaDelimitedPairs {
-		splitKeyValue := strings.Split(commaDelimitedPair, "=")
-		if len(splitKeyValue) == 2 {
-			outputTags = append(outputTags, network.IPTag{
-				IPTagType: &splitKeyValue[0],
-				Tag:       &splitKeyValue[1],
-			})
+	for k, v := range ipTagMap {
+		ipTag := network.IPTag{
+			IPTagType: &k,
+			Tag:       &v,
 		}
+		outputTags = append(outputTags, ipTag)
 	}
 
 	return &outputTags
