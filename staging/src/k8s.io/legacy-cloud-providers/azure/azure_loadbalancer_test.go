@@ -724,9 +724,73 @@ func TestConvertIPTagMapToSlice(t *testing.T) {
 				return to.String(ipTagSlice[i].IPTagType) < to.String(ipTagSlice[j].IPTagType)
 			})
 		}
+		if c.expected != nil {
+			sort.Slice(*c.expected, func(i, j int) bool {
+				ipTagSlice := *c.expected
+				return to.String(ipTagSlice[i].IPTagType) < to.String(ipTagSlice[j].IPTagType)
+			})
+
+		}
+
 		assert.Equal(t, actual, c.expected, "TestCase[%d]: %s", i, c.desc)
 	}
 }
+
+func TestGetIPTagsForPublicIP(t *testing.T) {
+	tests := []struct {
+		desc     string
+		input    *v1.Service
+		expected *[]network.IPTag
+	}{
+		{
+			desc:     "nil slice should be returned when the map is nil",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			desc: "two tags should be returned when service has set two tag pairs (and one malformation) in the annotation",
+			input: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						ServiceAnnotationIPTagsForPublicIP: "tag1=tag1value,tag2=tag2value,tag3malformed",
+					},
+				},
+			},
+			expected: &[]network.IPTag{
+				network.IPTag{
+					IPTagType: to.StringPtr("tag1"),
+					Tag:       to.StringPtr("tag1value"),
+				},
+				network.IPTag{
+					IPTagType: to.StringPtr("tag2"),
+					Tag:       to.StringPtr("tag2value"),
+				},
+			},
+		},
+	}
+	for i, c := range tests {
+		actual := getIPTagsForPublicIP(c.input)
+
+		// Sort output to provide stability of return from map for test comparison
+		// The order doesn't matter at runtime.
+		if actual != nil {
+			sort.Slice(*actual, func(i, j int) bool {
+				ipTagSlice := *actual
+				return to.String(ipTagSlice[i].IPTagType) < to.String(ipTagSlice[j].IPTagType)
+			})
+		}
+		if c.expected != nil {
+			sort.Slice(*c.expected, func(i, j int) bool {
+				ipTagSlice := *c.expected
+				return to.String(ipTagSlice[i].IPTagType) < to.String(ipTagSlice[j].IPTagType)
+			})
+
+		}
+
+		assert.Equal(t, actual, c.expected, "TestCase[%d]: %s", i, c.desc)
+	}
+}
+
 func TestGetServiceTags(t *testing.T) {
 	tests := []struct {
 		desc     string

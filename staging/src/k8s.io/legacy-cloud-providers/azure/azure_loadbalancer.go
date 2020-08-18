@@ -633,8 +633,8 @@ func convertIPTagMapToSlice(ipTagMap map[string]string) *[]network.IPTag {
 	outputTags := []network.IPTag{}
 	for k, v := range ipTagMap {
 		ipTag := network.IPTag{
-			IPTagType: &k,
-			Tag:       &v,
+			IPTagType: to.StringPtr(k),
+			Tag:       to.StringPtr(v),
 		}
 		outputTags = append(outputTags, ipTag)
 	}
