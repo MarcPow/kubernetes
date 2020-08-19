@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -618,6 +619,31 @@ func getIPTagMapForPublicIP(service *v1.Service) map[string]string {
 	}
 
 	return outputMap
+}
+
+func sortIPTags(ipTags *[]network.IPTag) {
+	if ipTags != nil {
+		sort.Slice(*ipTags, func(i, j int) bool {
+			ipTag := *ipTags
+			return to.String(ipTag[i].IPTagType) < to.String(ipTag[j].IPTagType) ||
+				to.String(ipTag[i].Tag) < to.String(ipTag[j].Tag)
+		})
+	}
+}
+
+func areIPTagsEqualOrderInsensitive(ipTags1 *[]network.IPTag, ipTags2 *[]network.IPTag) bool {
+	sortIPTags(ipTags1)
+	sortIPTags(ipTags2)
+
+	if ipTags1 == nil {
+		ipTags1 = &[]network.IPTag{}
+	}
+
+	if ipTags2 == nil {
+		ipTags2 = &[]network.IPTag{}
+	}
+
+	return reflect.DeepEqual(ipTags1, ipTags2)
 }
 
 func convertIPTagMapToSlice(ipTagMap map[string]string) *[]network.IPTag {
@@ -1519,6 +1545,7 @@ func deduplicate(collection *[]string) *[]string {
 func (az *Cloud) reconcilePublicIP(clusterName string, service *v1.Service, lbName string, wantLb bool) (*network.PublicIPAddress, error) {
 	isInternal := requiresInternalLoadBalancer(service)
 	serviceName := getServiceName(service)
+	serviceIPTags := getIPTagsForPublicIP(service)
 	var lb *network.LoadBalancer
 	var desiredPipName string
 	var err error
@@ -1545,27 +1572,54 @@ func (az *Cloud) reconcilePublicIP(clusterName string, service *v1.Service, lbNa
 		return nil, err
 	}
 
-	var found bool
+	var serviceAnnotationRequestsNamedPublicIP bool = shouldPIPExisted
+	var discoveredDesiredPublicIP bool
+	var deletedDesiredPublicIP bool
 	var pipsToBeDeleted []*network.PublicIPAddress
 	for i := range pips {
 		pip := pips[i]
 		pipName := *pip.Name
-		if serviceOwnsPublicIP(&pip, clusterName, serviceName) {
-			// We need to process for pips belong to this service
-			if wantLb && !isInternal && pipName == desiredPipName {
-				// This is the only case we should preserve the
-				// Public ip resource with match service tag
-				found = true
-			} else {
-				pipsToBeDeleted = append(pipsToBeDeleted, &pip)
-			}
-		} else if wantLb && !isInternal && pipName == desiredPipName {
-			found = true
+		pipPropertiesFormat := pip.PublicIPAddressPropertiesFormat
+
+		// If we've been told to use a specific public ip by the client, let's track whether or not it actually existed
+		// when we inspect the set in Azure.
+		discoveredDesiredPublicIP = discoveredDesiredPublicIP || wantLb && !isInternal && pipName == desiredPipName
+
+		// Now, let's perform additional analysis.
+		// Specifically, we should decide if the discovered public ips should be released/deleted.
+
+		// If the service does not own the ip, we cannot delete it under any circumstances
+		if !serviceOwnsPublicIP(&pip, clusterName, serviceName) {
+			continue
+		}
+
+		if
+		// If we don't actually want a load balancer,
+		!wantLb ||
+			// If the load balancer is internal, and thus doesn't require public exposure
+			isInternal ||
+			// If the name of this public ip does not match the desired name,
+			(pipName != desiredPipName) ||
+			// If the service annotations have specified required ip tags, but thy do not match the iptags of the existing instance
+			(serviceIPTags != nil && (pipPropertiesFormat == nil /*unit test*/ ||
+				(pipPropertiesFormat != nil && areIPTagsEqualOrderInsensitive((*pipPropertiesFormat).IPTags, serviceIPTags)))) {
+
+			// Then, release the public ip
+			pipsToBeDeleted = append(pipsToBeDeleted, &pip)
+
+			// Flag if we deleted the desired public ip
+			deletedDesiredPublicIP = deletedDesiredPublicIP || pipName == desiredPipName
+
+			// An aside: It would be unusual, but possible, for us to delete a public ip referred to explicitly by name
+			// in Service annotations (which is usually reserved for non-service-owned externals), if that IP is tagged as
+			// having been owned by a particular Kubernetes cluster.
 		}
 	}
-	if !isInternal && shouldPIPExisted && !found && wantLb {
+
+	if !isInternal && serviceAnnotationRequestsNamedPublicIP && !discoveredDesiredPublicIP && wantLb {
 		return nil, fmt.Errorf("reconcilePublicIP for service(%s): pip(%s) not found", serviceName, desiredPipName)
 	}
+
 	var deleteFuncs []func() error
 	for _, pip := range pipsToBeDeleted {
 		pipCopy := *pip
@@ -1583,7 +1637,8 @@ func (az *Cloud) reconcilePublicIP(clusterName string, service *v1.Service, lbNa
 		// Confirm desired public ip resource exists
 		var pip *network.PublicIPAddress
 		domainNameLabel, found := getPublicIPDomainNameLabel(service)
-		if pip, err = az.ensurePublicIPExists(service, desiredPipName, domainNameLabel, clusterName, shouldPIPExisted, found); err != nil {
+		errorIfPublicIPDoesNotExist := serviceAnnotationRequestsNamedPublicIP && discoveredDesiredPublicIP && !deletedDesiredPublicIP
+		if pip, err = az.ensurePublicIPExists(service, desiredPipName, domainNameLabel, clusterName, errorIfPublicIPDoesNotExist, found); err != nil {
 			return nil, err
 		}
 		return pip, nil
